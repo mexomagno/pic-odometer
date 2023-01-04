@@ -87,10 +87,11 @@ switchlock		RES		1			;1 si se bloquea switch
 ;si la velocidad era cero, no se calcula por esta vez y se mantiene en cero, mientras
 ;el valor se normaliza volviéndose a medir.
 millis10		RES		1
-
-
-
-
+waux2			RES		1
+d				RES		1 ;diámetro de la rueda en cms
+factorvel		RES		2	;factor definido al inicio para calcular velocidad
+factorveltemp	RES		2
+iDivRepeat		RES		1
 ;------------------------------------------------------------------------------
 ; EEPROM INITIALIZATION
 ;
@@ -179,21 +180,56 @@ endif1
 		movwf	debounce
 		comf	switchlock
 		
-		
+;*************************************************
 	;Se hizo un click válido
-	;contar PROVISORIO
-		incf	number,f
-		movlw	.100
-		xorwf	number,w ;si es 100, resulta cero y activa Z
-		btfss	STATUS,Z	;Hay que aumentar número
-		goto	$+2
-		;Si llega a 10, reiniciarlo
-		clrf	number
+	;calcular velocidad con el valor de millis10 obtenido
+	;Se sabe que millis10 aumenta cada 10 millis. luego:
+	;1000 ms/ x pulsos = millis10*10 / 1 -> x = 100/millis10
+		movf	millis10,f
+		btfss	STATUS,Z
 		
+		;**** provisorio
+		;goto $+4
+		;movlw	.0
+		;movwf	number
+		;goto $+3
+		;movf	millis10,w
+		;movwf	number
+		;****
+		
+		goto	$+3
+		movlw	.1		;si era cero, se le asigna el mínimo: 1 (10 ms)
+		movwf	millis10
+		
+	;calcular velocidad a partir de millis10. V=3.6 * 3.1415 * d (cm) / millis10  km/h
+		call	calculaVelocidad
+	;resultado en 'waux'. Asignar a 'number'
+		movf	waux,w
+		movwf	number
+		
+	;resetear millis10.
+		movlw	.0
+		movwf	millis10
+		goto	contadores
+	;setear number con valor de la velocidad
+		
+	
+	;**** contar PROVISORIO
+		;incf	number,f
+		;movlw	.100
+		;xorwf	number,w ;si es 100, resulta cero y activa Z
+		;btfss	STATUS,Z	;Hay que aumentar número
+		;goto	$+2
+		;Si llega a 10, reiniciarlo
+		;clrf	number
+	;****
+;*************************************************		
 		
 endswitch
 		;desbloquear switch sólo si se cumple tiempo de debounce
-		btfsc	GPIO,GP3
+		movf	debounce,f
+		btfss	STATUS,Z
+		goto	contadores
 		clrf	switchlock
 ;************* fin switch magnético
 
@@ -212,14 +248,20 @@ contadores
 		movwf	pausa2
 ;llega acá cuando cumplió el tiempo de delay fijado (50*10 ms = 500ms)
 decdebounce
-
-		;Aumentar deltat
-		incf	millis10
-		
-		;si está apretado el switch, disminuir tiempo de debounce
+		;Aumentar millis10
+		incf	millis10,f
+		;si es 255 poner velocidad 0 y mantener el contador en ese numero
+		movf	millis10,w
+		xorlw	.255
+		btfss	STATUS,Z
+		goto	dibauns
+		decf	millis10,f
+		clrf	number
+dibauns
+		;disminuir tiempo de debounce si aun no es cero
 		movf	debounce,f
 		btfsc	STATUS,Z
-		goto write_display
+		goto	write_display
 		decf	debounce,f
 write_display
 		;**********************************
@@ -259,6 +301,103 @@ fin_handler
         SWAPF   W_TEMP,w      ; restore pre-isr W register contents
         RETFIE                ; return from interrupt
 
+calculaVelocidad
+	;Esta función debe calcular velocidad como v=3.6 * 3.1415 * d (cm) / millis10
+	;El valor de 3.6*3.1415*d es calculado al inicio, pues una vez fijado el diametro
+	;de la rueda, el valor es constante. El valor se almacena en 'factorvel'
+	;Para hacer calculos, copiar factorvel en factorveltemp
+	movf	factorvel,w
+	movwf	factorveltemp
+	movf	factorvel+1,w
+	movwf	factorveltemp+1
+	movf	millis10,w
+	call	Div
+	movf	factorveltemp,w
+	
+	;movf	millis10,w
+	
+	movwf	waux
+	return
+	
+	
+	
+	;movlw	.100
+	;movwf	waux2    ;se le restará el divisor
+	;clrf	waux	;tendrá el resultado
+;div_ini
+	;movf	millis10,w
+	;subwf 	waux2,f
+	;btfss	STATUS,C
+	;goto	div_end
+	;incf	waux,f
+	;goto	div_ini
+;div_end		
+	;return
+	
+	
+#define bf_carry 3, 0
+#define bf_zero 3, 2
+
+#define same 1
+#define wreg 0
+
+#define stc bsf bf_carry
+#define clc bcf bf_carry
+
+;-[ Div ]--------------------------------------------------------------
+; Call w/: Number in f_divhi:f_divlo, divisor in W.
+; Returns: Quotient in f_divlo, remainder in f_divhi. W preserved.
+;          Carry set if error. Z if divide by zero, NZ if divide overflow.
+; Notes:   Works by left shifted subtraction.
+;          Size = 29, Speed(w/ call&ret) = 7 cycles if div by zero
+;          Speed = 94 minimum, 129 maximum cycles
+
+Div;
+    addlw 0          ; w+=0 (to test for div by zero)
+    stc              ; set carry in case of error
+    btfsc bf_zero    ; if zero
+     return          ;   return (error C,Z)
+
+    call DivSkipHiShift
+
+    call DivCode
+    call DivCode
+    call DivCode
+    call DivCode
+    call DivCode
+    call DivCode
+    call DivCode
+    call DivCode
+
+    rlf factorveltemp, same ; C << lo << C
+
+    ; If the first subtract didn't underflow, and the carry was shifted
+    ; into the quotient, then it will be shifted back off the end by this
+    ; last RLF. This will automatically raise carry to indicate an error.
+    ; The divide will be accurate to quotients of 9-bits, but past that
+    ; the quotient and remainder will be bogus and carry will be set.
+
+    bcf bf_zero  ; NZ (in case of overflow error)
+    return       ; we are done!
+
+DivCode
+    rlf factorveltemp, same    ; C << lo << C
+    rlf factorveltemp+1, same    ; C << hi << C
+    btfss bf_carry       ; if Carry
+     goto DivSkipHiShift ;
+    subwf factorveltemp+1, same  ;   hi-=w
+    stc                  ;   ignore carry
+    return               ;   done
+                         ; endif
+DivSkipHiShift
+    subwf factorveltemp+1, same  ; hi-=w
+    btfsc bf_carry       ; if carry set
+     return              ;   done
+    addwf factorveltemp+1, same  ; hi+=w
+    clc                  ; clear carry
+    return               ; done
+
+	
 
 divide_10
     clrf    waux          ; result = 0
@@ -322,9 +461,6 @@ INIT
 ;------------------------------------------------------------------------------
 ; FUNCIONES
 ;------------------------------------------------------------------------------
-;recibe valor en w y entrega en w la división por 10
-
-
 
 main
 		;setear puertos como output
@@ -371,6 +507,38 @@ main
 		;inicializar millis10
 		movlw	.0
 		movwf	millis10
+		movlw	.11 ;11,31
+		movwf	factorvel
+		clrf	factorvel+1
+		;inicializar diámetro de la rueda en cms
+		movlw	.62
+		;calcular factorvel según diámetro definido
+		
+multfactor
+
+	CLRF factorvel+1
+
+	CLRF waux
+	BSF waux,3
+
+	RRF factorvel,F
+
+LOOP:
+
+	SKPNC
+	ADDWF factorvel+1,F
+	
+	RRF factorvel+1,F
+	RRF factorvel,F
+
+	DECFSZ waux
+	GOTO LOOP
+		
+		;call DIV16x8by10
+		;movf	factorveltemp,w
+		;movwf	factorvel
+		;movf	factorveltemp+1,w
+		;movwf	factorvel+1
 		;habilitar interrupciones globales
 		bsf		INTCON,GIE
 
@@ -380,10 +548,27 @@ while1
 		movf	gpiocopia,w
 		banksel	GPIO
 		movwf	GPIO
-		goto	endwhile
-endwhile	
 		goto 	while1
 
+
+
+DIV16x8by10
+	CLRF	factorveltemp+1	; Clear quotient registers
+	CLRF	factorveltemp	;
+	MOVLW	10	; W = divisor
+STEP	SUBWF	factorvel,F	; Subtract 10 from dividend LSB
+	BTFSC	STATUS,C	; Carry?
+	GOTO	BUMP	; No. Jump
+	MOVF	factorvel+1,F	; Yes. Is dividend MSB 0?
+	BTFSC	STATUS,Z	;
+	GOTO	DONE	; Yes. Done
+	DECF	factorvel+1,F	; No. Decrement dividend MSB
+BUMP	INCF	factorveltemp,F	; Bump quotient LSB
+	BTFSC	STATUS,Z	; Is it 0?
+	INCF	factorveltemp+1,F	; Yes. Increment quotient MSB
+	GOTO	STEP	; Loop until dividend is <0
+DONE	ADDWF	factorvel,F	; Correct the dividend LSB
+	RETURN
 
 
 
