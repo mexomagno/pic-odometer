@@ -68,13 +68,25 @@ number		RES		1			;número real
 displaynumber		RES		1			;Numero en displays
 pausa1		RES		1
 pausa2		RES		1
-freq		RES		1
 waux		RES		1
 display		RES		1			;display activo. 0 = menos significativo
+debounce	RES		1			;usado para debounce del switch
+switchlock		RES		1			;1 si se bloquea switch
 
-
-
-
+;variables grandes para contar paso del tiempo
+;se quiere poder recibir pulsos separados por hasta 2 segundos.
+;Cada vez que se identifique un pulso, se comienza a incrementar una variable.
+;Claramente antes de reiniciarla, se ve su valor y con esto se calcula la velocidad
+;Este valor debe poder ser lo suficientemente grande para obtener precisión, pero
+;pequeño para no complicar el manejo de números grandes. Una idea es incrementar el valor
+;cada 10ms lo que es conveniente dada la implementación actual del programa.
+;Según esto, el valor podría llegar a ser como máximo 200. Esto define la resolución 
+;que se tendrá para la velocidad.
+;Cuando pase los 200, se debe asumir velocidad 0, no obstante, el valor puede seguir
+;aumentando hasta producir overflow. Lo único que cambiaría es que al recibir otro pulso, 
+;si la velocidad era cero, no se calcula por esta vez y se mantiene en cero, mientras
+;el valor se normaliza volviéndose a medir.
+millis10		RES		1
 
 
 
@@ -149,19 +161,66 @@ if1
 		movwf	displaynumber
 endif1
 		
+;*************comportamiento switch magnético
+		;revisar si se prende
+		banksel	GPIO
+		btfsc	GPIO,GP3
+		goto	endswitch
+		;se activó switch. Ver si no es un bounce o si ya está apretado
+		btfsc	switchlock,0
+		goto	contadores
+		;ver si es bounce
+		movf	debounce,f
+		btfss	STATUS,Z
+		goto	contadores
 		
+		;bloquear switch y reiniciar valor de debounce
+		movlw	.11
+		movwf	debounce
+		comf	switchlock
+		
+		
+	;Se hizo un click válido
+	;contar PROVISORIO
+		incf	number,f
+		movlw	.100
+		xorwf	number,w ;si es 100, resulta cero y activa Z
+		btfss	STATUS,Z	;Hay que aumentar número
+		goto	$+2
+		;Si llega a 10, reiniciarlo
+		clrf	number
+		
+		
+endswitch
+		;desbloquear switch sólo si se cumple tiempo de debounce
+		btfsc	GPIO,GP3
+		clrf	switchlock
+;************* fin switch magnético
+
+
+contadores
 ;aumentar contadores de frecuencia
+;pausa1 aumenta cada 256 us
 		decfsz	pausa1,f
 		goto	write_display
 		movlw	.40
 		movwf	pausa1
-		
+;pausa2 aumenta cada 40*250 us = 10000 us = 10 ms
 		decfsz	pausa2,f
-		goto	write_display
+		goto	decdebounce
 		movlw	.50
 		movwf	pausa2
-;llega acá cuando cumplió el tiempo de delay fijado
+;llega acá cuando cumplió el tiempo de delay fijado (50*10 ms = 500ms)
+decdebounce
+
+		;Aumentar deltat
+		incf	millis10
 		
+		;si está apretado el switch, disminuir tiempo de debounce
+		movf	debounce,f
+		btfsc	STATUS,Z
+		goto write_display
+		decf	debounce,f
 write_display
 		;**********************************
 		;Escribir número en el display activo
@@ -270,7 +329,6 @@ INIT
 main
 		;setear puertos como output
 		bsf		STATUS,RP0
-		banksel	TRISIO
 		clrf	TRISIO
 		;setear GPIO3 como input (no es necesario, pero lo haré de todas maneras)
 		bsf		TRISIO,TRISIO3
@@ -304,8 +362,16 @@ main
 		;inicializar número a mostrar
 		movlw	.0
 		movwf	number
+		;inicializar debouncer. Deja funcionar el switch máximo cada debounce*10 ms
+		movlw	.11
+		movwf	debounce
+		;inicializar switchlock
+		movlw	.0
+		movwf	switchlock
+		;inicializar millis10
+		movlw	.0
+		movwf	millis10
 		;habilitar interrupciones globales
-		clrf	freq
 		bsf		INTCON,GIE
 
 ;funcionamiento principal del programa
@@ -314,23 +380,7 @@ while1
 		movf	gpiocopia,w
 		banksel	GPIO
 		movwf	GPIO
-		
-		
-		
-		
-		
-		
-		
-		btfsc	GPIO,GP3
 		goto	endwhile
-;cambiar número
-		incf	number,f
-		movlw	.100
-		xorwf	number,w ;si es 100, resulta cero y activa Z
-		btfss	STATUS,Z	;Hay que aumentar número
-		goto	$+2
-		;Si llega a 10, reiniciarlo
-		clrf	number
 endwhile	
 		goto 	while1
 
